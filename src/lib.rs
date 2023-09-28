@@ -6,10 +6,13 @@ use core::{
     mem::MaybeUninit,
     ops,
     ptr::{self, NonNull},
+    slice,
 };
 
 mod sealed {
     pub trait Sealed {}
+
+    impl Sealed for bumpalo::Bump {}
 }
 
 pub trait BumpaloThinSliceExt: sealed::Sealed {
@@ -42,8 +45,6 @@ pub trait BumpaloThinSliceExt: sealed::Sealed {
     where
         F: FnMut(usize) -> T;
 }
-
-impl sealed::Sealed for Bump {}
 
 impl BumpaloThinSliceExt for Bump {
     fn alloc_thin_slice_clone<T>(&self, src: &[T]) -> ThinSlice<'_, T>
@@ -161,6 +162,12 @@ impl Header {
 /// Properties of `&[T]` that are preserved:
 /// * `size_of::<ThinSlice<'_, T>>()` == `size_of::<Option<ThinSlice<'_, T>>()`
 /// * The empty `ThinSlice` points to a statically allocated singleton.
+///
+/// Note that this type is intentially not [`Copy`] or [`Clone`]. This is
+/// because if you cloned it, you would have two pointers to the same
+/// allocation which could then be converted into mutable slices, violating
+/// Rust's uniqueness invariants. Use [`ThinSlice::as_slice`] to get a slice
+/// instead, which you may then freely copy.
 pub struct ThinSlice<'bump, T> {
     header: NonNull<Header>,
     _marker: PhantomData<&'bump mut [T]>,
@@ -199,23 +206,22 @@ impl<'bump, T> ThinSlice<'bump, T> {
         }
     }
 
-    fn as_raw_slice(self) -> *mut [T] {
+    /// Returns the underlying slice with the lifetime of the bump allocator.
+    pub fn as_slice(&self) -> &'bump [T] {
         unsafe {
             let len = self.header.as_ref().len;
             let data = Header::data(self.header);
-
-            ptr::slice_from_raw_parts_mut(data, len)
+            slice::from_raw_parts(data, len)
         }
-    }
-
-    /// Returns the underlying slice with the lifetime of the bump allocator.
-    pub fn as_slice(&self) -> &'bump [T] {
-        unsafe { &*self.as_raw_slice() }
     }
 
     /// Returns the underlying mutable slice with the lifetime of the bump allocator.
     pub fn as_mut_slice(&mut self) -> &'bump mut [T] {
-        unsafe { &mut *self.as_raw_slice() }
+        unsafe {
+            let len = self.header.as_ref().len;
+            let data = Header::data(self.header);
+            slice::from_raw_parts_mut(data, len)
+        }
     }
 }
 
@@ -241,14 +247,6 @@ impl<'bump, T> ThinSlice<'bump, MaybeUninit<T>> {
         }
     }
 }
-
-impl<T> Clone for ThinSlice<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for ThinSlice<'_, T> {}
 
 impl<T> ops::Deref for ThinSlice<'_, T> {
     type Target = [T];
