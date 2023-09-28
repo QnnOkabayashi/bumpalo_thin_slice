@@ -105,7 +105,7 @@ impl BumpaloThinSliceExt for Bump {
 
 type Header = usize;
 
-/// Returns the length of header.
+/// Returns the length stored in the header.
 ///
 /// # Safety
 ///
@@ -250,17 +250,20 @@ impl<'bump, T> ThinSlice<'bump, T> {
     }
 
     /// Returns a slice containing the contents of `self`.
+    #[must_use]
     pub fn as_slice(&self) -> &[T] {
         unsafe { slice::from_raw_parts(data(self.header), len(self.header)) }
     }
 
     /// Returns a mut slice containing the contents of `self`.
+    #[must_use]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { slice::from_raw_parts_mut(data(self.header), len(self.header)) }
     }
 
     /// Convert the `ThinSlice` into a mut slice containing the contents of
     /// `self`, whose lifetime is bound by `'bump`.
+    #[must_use]
     pub fn into_slice(self) -> &'bump mut [T] {
         // Same as `as_mut_slice`, but lifetime is bound differently
         unsafe { slice::from_raw_parts_mut(data(self.header), len(self.header)) }
@@ -296,9 +299,10 @@ impl<'bump, T> ThinSlice<'bump, MaybeUninit<T>> {
     /// The entire slice must be properly initialized. The easiest way
     /// to do this is to iterate through with [`ThinSlice::as_mut_slice`]
     /// and populate each element directly.
+    #[must_use]
     pub unsafe fn assume_init(self) -> ThinSlice<'bump, T> {
         ThinSlice {
-            header: self.header.cast(),
+            header: self.header,
             _marker: PhantomData,
         }
     }
@@ -332,7 +336,7 @@ where
     T: hash::Hash,
 {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.as_slice().hash(state)
+        self.as_slice().hash(state);
     }
 }
 
