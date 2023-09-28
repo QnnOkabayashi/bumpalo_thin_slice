@@ -186,17 +186,11 @@ impl<'bump, T> ThinSlice<'bump, T> {
             return ThinSlice::default();
         }
 
-        // Create the layout of the allocation
         let layout = Header::array_layout::<T>(len).expect("array size is too large");
-
-        // Allocate
         let header = bump.alloc_layout(layout).cast::<Header>();
 
         unsafe {
-            // Initialize header
             ptr::write(header.as_ptr(), Header::new(len));
-
-            // Initialize values
             init(Header::data(header));
         }
 
@@ -206,8 +200,7 @@ impl<'bump, T> ThinSlice<'bump, T> {
         }
     }
 
-    /// Returns the underlying slice with the lifetime of the bump allocator.
-    pub fn as_slice(&self) -> &'bump [T] {
+    pub fn as_slice(&self) -> &[T] {
         unsafe {
             let len = self.header.as_ref().len;
             let data = Header::data(self.header);
@@ -215,8 +208,16 @@ impl<'bump, T> ThinSlice<'bump, T> {
         }
     }
 
-    /// Returns the underlying mutable slice with the lifetime of the bump allocator.
-    pub fn as_mut_slice(&mut self) -> &'bump mut [T] {
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        unsafe {
+            let len = self.header.as_ref().len;
+            let data = Header::data(self.header);
+            slice::from_raw_parts_mut(data, len)
+        }
+    }
+
+    pub fn into_slice(self) -> &'bump mut [T] {
+        // Same as `as_mut_slice`, but lifetime is bound differently
         unsafe {
             let len = self.header.as_ref().len;
             let data = Header::data(self.header);
