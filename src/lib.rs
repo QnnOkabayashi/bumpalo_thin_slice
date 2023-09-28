@@ -1,6 +1,8 @@
+// TODO(quinn): inline this for better formatting
+#![doc = include_str!("../README.md")]
 use bumpalo::Bump;
 use core::{
-    alloc::{Layout, LayoutError},
+    alloc::Layout,
     cmp, fmt, hash,
     marker::PhantomData,
     mem::MaybeUninit,
@@ -51,46 +53,35 @@ impl BumpaloThinSliceExt for Bump {
     where
         T: Clone,
     {
-        unsafe {
-            ThinSlice::new(self, src.len(), |dst: *mut T| {
-                for (i, val) in src.iter().cloned().enumerate() {
-                    // SAFETY: pointer points to a valid allocation
-                    ptr::write(dst.add(i), val);
-                }
-            })
-        }
+        ThinSlice::new_clone(self, src)
     }
 
     fn alloc_thin_slice_copy<T>(&self, src: &[T]) -> ThinSlice<'_, T>
     where
         T: Copy,
     {
-        unsafe {
-            ThinSlice::new(self, src.len(), |dst| {
-                ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut T, src.len());
-            })
-        }
+        ThinSlice::new_copy(self, src)
     }
 
     fn alloc_thin_slice_fill_clone<T>(&self, len: usize, value: &T) -> ThinSlice<'_, T>
     where
         T: Clone,
     {
-        self.alloc_thin_slice_fill_with(len, |_| value.clone())
+        ThinSlice::from_fn(self, len, |_| value.clone())
     }
 
     fn alloc_thin_slice_fill_copy<T>(&self, len: usize, value: T) -> ThinSlice<'_, T>
     where
         T: Copy,
     {
-        self.alloc_thin_slice_fill_with(len, |_| value)
+        ThinSlice::from_fn(self, len, |_| value)
     }
 
     fn alloc_thin_slice_fill_default<T>(&self, len: usize) -> ThinSlice<'_, T>
     where
         T: Default,
     {
-        self.alloc_thin_slice_fill_with(len, |_| T::default())
+        ThinSlice::from_fn(self, len, |_| T::default())
     }
 
     fn alloc_thin_slice_fill_iter<T, I>(&self, iter: I) -> ThinSlice<'_, T>
@@ -99,62 +90,48 @@ impl BumpaloThinSliceExt for Bump {
         I::IntoIter: ExactSizeIterator,
     {
         let mut iter = iter.into_iter();
-        self.alloc_thin_slice_fill_with(iter.len(), |_| {
+        ThinSlice::from_fn(self, iter.len(), |_| {
             iter.next().expect("Iterator supplied to few elements")
         })
     }
 
-    fn alloc_thin_slice_fill_with<T, F>(&self, len: usize, mut f: F) -> ThinSlice<'_, T>
+    fn alloc_thin_slice_fill_with<T, F>(&self, len: usize, f: F) -> ThinSlice<'_, T>
     where
         F: FnMut(usize) -> T,
     {
-        unsafe {
-            ThinSlice::new(self, len, |dst: *mut T| {
-                for i in 0..len {
-                    ptr::write(dst.add(i), f(i));
-                }
-            })
-        }
+        ThinSlice::from_fn(self, len, f)
     }
 }
 
-#[repr(transparent)]
-struct Header {
-    len: usize,
+type Header = usize;
+
+/// Returns the length of header.
+///
+/// # Safety
+///
+/// Same safety invariants as [`NonNull::as_ref`].
+unsafe fn len(header: NonNull<Header>) -> usize {
+    *header.as_ref()
 }
 
-impl Header {
-    const fn new(len: usize) -> Self {
-        Header { len }
-    }
+/// Returns the data following a header.
+///
+/// # Safety
+///
+/// Must point to a valid allocation of `Header`, e.g. cannot dangle.
+unsafe fn data<T>(header: NonNull<Header>) -> *mut T {
+    // This gets constant-folded even at opt-level=1
+    let header_layout = Layout::new::<Header>();
+    let array_layout = Layout::new::<T>();
+    let offset = header_layout.extend(array_layout).unwrap().1;
 
-    fn empty() -> NonNull<Self> {
-        static EMPTY: Header = Header::new(0);
-
-        NonNull::from(&EMPTY)
-    }
-
-    fn array_layout<T>(len: usize) -> Result<Layout, LayoutError> {
-        // This gets constant-folded even at opt-level=1
-        let size_layout = Layout::new::<usize>();
-        let array_layout = Layout::array::<T>(len)?;
-        let layout = size_layout.extend(array_layout)?.0;
-
-        Ok(layout)
-    }
-
-    fn data<T>(this: NonNull<Self>) -> *mut T {
-        // This gets constant-folded even at opt-level=1
-        let size_layout = Layout::new::<usize>();
-        let array_layout = Layout::new::<T>();
-        let offset = size_layout.extend(array_layout).unwrap().1;
-
-        unsafe { this.as_ptr().cast::<u8>().add(offset).cast::<T>() }
-    }
+    // SAFETY: `offset` cannot be larger than `isize::MAX`, and
+    // the validity of the allocation is upheld by the caller.
+    unsafe { header.as_ptr().cast::<u8>().add(offset).cast::<T>() }
 }
 
 /// `ThinSlice<'bump, T>` is exactly the same as `&'bump mut [T]`, except that
-/// both the length and data live in a [`Bump`] allocator.
+/// both the length and data live in the buffer owned by the [`Bump`] allocator.
 ///
 /// This makes the memory footprint of `ThinSlice`s lower. Being pointer-sized
 /// also means it can be passed/stored in registers.
@@ -163,7 +140,7 @@ impl Header {
 /// * `size_of::<ThinSlice<'_, T>>()` == `size_of::<Option<ThinSlice<'_, T>>()`
 /// * The empty `ThinSlice` points to a statically allocated singleton.
 ///
-/// Note that this type is intentially not [`Copy`] or [`Clone`]. This is
+/// Note that this type is intentially not `Copy` or `Clone`. This is
 /// because if you cloned it, you would have two pointers to the same
 /// allocation which could then be converted into mutable slices, violating
 /// Rust's uniqueness invariants. Use [`ThinSlice::as_slice`] to get a slice
@@ -174,10 +151,32 @@ pub struct ThinSlice<'bump, T> {
 }
 
 impl<'bump, T> ThinSlice<'bump, T> {
+    /// Allocate a new `ThinSlice` with a given length and initialization
+    /// function that accepts a pointer to an uninitialized array of `len`
+    /// elements.
+    ///
     /// # Safety
     ///
-    /// `init` must properly initialize the array of length `len` pointed
-    /// to by the input to proper `T` values.
+    /// This function is unsafe because `init` is responsible for ensuring
+    /// that all elements are properly initialized before returning.
+    ///
+    /// # Examples
+    ///
+    /// Implementation of [`ThinSlice::new_copy`].
+    /// ```
+    /// # use bumpalo_thin_slice::ThinSlice;
+    /// # use bumpalo::Bump;
+    /// fn new_copy<'bump, T: Copy>(
+    ///     bump: &'bump Bump,
+    ///     src: &[T],
+    /// ) -> ThinSlice<'bump, T> {
+    ///     unsafe {
+    ///         ThinSlice::new(bump, src.len(), |dst: *mut T| {
+    ///             core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+    ///         })
+    ///     }
+    /// }
+    /// ```
     pub unsafe fn new<F>(bump: &'bump Bump, len: usize, init: F) -> Self
     where
         F: FnOnce(*mut T),
@@ -186,12 +185,20 @@ impl<'bump, T> ThinSlice<'bump, T> {
             return ThinSlice::default();
         }
 
-        let layout = Header::array_layout::<T>(len).expect("array size is too large");
+        let layout = {
+            let header_layout = Layout::new::<Header>();
+            let array_layout = Layout::array::<T>(len).expect("array size is too large");
+            header_layout
+                .extend(array_layout)
+                .expect("array size is too large")
+                .0
+        };
+
         let header = bump.alloc_layout(layout).cast::<Header>();
 
         unsafe {
-            ptr::write(header.as_ptr(), Header::new(len));
-            init(Header::data(header));
+            ptr::write(header.as_ptr(), len);
+            init(data(header));
         }
 
         ThinSlice {
@@ -200,46 +207,94 @@ impl<'bump, T> ThinSlice<'bump, T> {
         }
     }
 
+    /// Allocate a new `ThinSlice` whose elements are cloned from `src`.
+    pub fn new_clone(bump: &'bump Bump, src: &[T]) -> Self
+    where
+        T: Clone,
+    {
+        unsafe {
+            ThinSlice::new(bump, src.len(), |dst: *mut T| {
+                for (i, val) in src.iter().cloned().enumerate() {
+                    // SAFETY: pointer points to a valid allocation
+                    ptr::write(dst.add(i), val);
+                }
+            })
+        }
+    }
+
+    /// Allocate a new `ThinSlice` whose elements are copied from `src`.
+    pub fn new_copy(bump: &'bump Bump, src: &[T]) -> Self
+    where
+        T: Copy,
+    {
+        unsafe {
+            ThinSlice::new(bump, src.len(), |dst: *mut T| {
+                ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+            })
+        }
+    }
+
+    /// Allocate a new `ThinSlice` with a provided length given the closure
+    /// `f`, which returns each element `T` using that element's index.
+    pub fn from_fn<F>(bump: &'bump Bump, len: usize, mut f: F) -> Self
+    where
+        F: FnMut(usize) -> T,
+    {
+        unsafe {
+            ThinSlice::new(bump, len, |dst: *mut T| {
+                for i in 0..len {
+                    ptr::write(dst.add(i), f(i));
+                }
+            })
+        }
+    }
+
+    /// Returns a slice containing the contents of `self`.
     pub fn as_slice(&self) -> &[T] {
-        unsafe {
-            let len = self.header.as_ref().len;
-            let data = Header::data(self.header);
-            slice::from_raw_parts(data, len)
-        }
+        unsafe { slice::from_raw_parts(data(self.header), len(self.header)) }
     }
 
+    /// Returns a mut slice containing the contents of `self`.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe {
-            let len = self.header.as_ref().len;
-            let data = Header::data(self.header);
-            slice::from_raw_parts_mut(data, len)
-        }
+        unsafe { slice::from_raw_parts_mut(data(self.header), len(self.header)) }
     }
 
+    /// Convert the `ThinSlice` into a mut slice containing the contents of
+    /// `self`, whose lifetime is bound by `'bump`.
     pub fn into_slice(self) -> &'bump mut [T] {
         // Same as `as_mut_slice`, but lifetime is bound differently
-        unsafe {
-            let len = self.header.as_ref().len;
-            let data = Header::data(self.header);
-            slice::from_raw_parts_mut(data, len)
-        }
+        unsafe { slice::from_raw_parts_mut(data(self.header), len(self.header)) }
     }
 }
 
 impl<T> Default for ThinSlice<'_, T> {
     fn default() -> Self {
+        static EMPTY: Header = 0;
+
         ThinSlice {
-            header: Header::empty(),
+            header: NonNull::from(&EMPTY),
             _marker: PhantomData,
         }
     }
 }
 
 impl<'bump, T> ThinSlice<'bump, MaybeUninit<T>> {
+    /// Allocate a new `ThinSlice<'_, MaybeUninit<T>>` using a provided length.
+    pub fn new_uninit(bump: &'bump Bump, len: usize) -> Self {
+        unsafe {
+            ThinSlice::new(bump, len, |_dst: *mut MaybeUninit<T>| {
+                // Do nothing. Values of type `MaybeUninit` are already
+                // initialized on uninitialized memory by definition.
+            })
+        }
+    }
+
+    /// Convert a `ThinSlice<'_, MaybeUninit<T>>` to `ThinSlice<'_, T>`.
+    ///
     /// # Safety
     ///
     /// The entire slice must be properly initialized. The easiest way
-    /// to do this is to iterate through with [`TinySlice::as_mut_slice`]
+    /// to do this is to iterate through with [`ThinSlice::as_mut_slice`]
     /// and populate each element directly.
     pub unsafe fn assume_init(self) -> ThinSlice<'bump, T> {
         ThinSlice {
@@ -310,6 +365,26 @@ where
     }
 }
 
+impl<'a, T> IntoIterator for &'a ThinSlice<'_, T> {
+    type Item = &'a T;
+
+    type IntoIter = slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut ThinSlice<'_, T> {
+    type Item = &'a mut T;
+
+    type IntoIter = slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +396,15 @@ mod tests {
         let slice2: ThinSlice<'_, i32> = bump.alloc_thin_slice_fill_iter(0..10);
         assert_eq!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], slice1.as_slice());
         assert_eq!(slice1, slice2);
+    }
+
+    #[test]
+    fn same_size_when_stored_in_option() {
+        use core::mem::size_of;
+        assert_eq!(
+            size_of::<ThinSlice<'_, i32>>(),
+            size_of::<Option<ThinSlice<'_, i32>>>()
+        );
     }
 
     #[test]
@@ -365,5 +449,21 @@ mod tests {
         let slice = &[1, 2, 3, 4];
         let thin = bump.alloc_thin_slice_copy(slice);
         assert_eq!(slice, thin.as_slice());
+    }
+
+    #[test]
+    fn deref() {
+        let bump = Bump::new();
+        let slice = bump.alloc_thin_slice_copy(&[1, 2, 3]);
+        assert_eq!(&slice[..], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn into_iter() {
+        let bump = Bump::new();
+        let slice = bump.alloc_thin_slice_copy(&[1, 2, 3]);
+        for (a, b) in [1, 2, 3].iter().zip(&slice) {
+            assert_eq!(a, b);
+        }
     }
 }
