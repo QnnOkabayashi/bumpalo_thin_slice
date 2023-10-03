@@ -12,22 +12,22 @@ Thin slice type for `bumpalo`.
 
 # Overview
 
-`bumpalo_thin_slice` provides two items: `ThinSlice<'bump, T>` and `BumpaloThinSliceExt`.
+`bumpalo_thin_slice` provides three items: `BumpaloThinSliceExt`, `ThinSlice`, and `ThinSliceMut`.
 
-`ThinSlice<'bump, T>` is a struct consisting of a single pointer into a `Bump` allocation where the length and data is stored contiguously.
+`ThinSlice` and `ThinSliceMut` are structs consisting of a single pointer into a `Bump` allocation where the length and data is stored contiguously.
 This allows for storing slices in less space, which can be beneficial for reducing the size of nodes in tree structures stored in a `Bump` allocator.
-It also dereferences to a regular slice, allowing for all the flexibility that slices in the standard library come with.
+They also dereference to a regular slice, allowing for all the flexibility that slices in the standard library come with.
 
 `BumpaloThinSliceExt` is a trait implemented for `bumpalo::Bump` that provides `.alloc_thin_slice_*()` methods for each corresponding `.alloc_slice_*()` method that `Bump` comes with.
 
-Using these two items, you should be able to replace all `Bump`-allocated `&'bump [T]` and `&'bump mut [T]` in your program with `ThinSlice<'bump, T>`, and all `bump.alloc_slice_*()` methods with `bump.alloc_thin_slice_*()`.
+Using these three items, you should be able to replace `&'bump [T]` with `ThinSlice<'bump, T>`, `&'bump mut [T]` with `ThinSliceMut<'bump, T>`, and `bump.alloc_slice_*()` methods with `bump.alloc_thin_slice_*()`.
 
 # Getting started
 
 TODO
 
 ```
-use bumpalo_thin_slice::{BumpaloThinSliceExt, ThinSlice};
+use bumpalo_thin_slice::{BumpaloThinSliceExt, ThinSliceMut, ThinSlice};
 ```
 
 # Examples
